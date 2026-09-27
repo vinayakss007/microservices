@@ -1,0 +1,14 @@
+{
+  "name": "@hookwatch/shared",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "dependencies": {
+    "ioredis": "^5.4.2",
+    "pg": "^8.13.1"
+  }
+}

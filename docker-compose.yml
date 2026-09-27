@@ -1,0 +1,132 @@
+name: hookwatch
+
+x-service: &service-defaults
+  build:
+    context: .
+    dockerfile: Dockerfile
+  restart: unless-stopped
+  environment: &env-defaults
+    NODE_ENV: production
+    LOG_LEVEL: info
+    INTERNAL_TOKEN: ${INTERNAL_TOKEN:-dev-internal-token}
+    DATABASE_URL: postgres://hookwatch:hookwatch@postgres:5432/hookwatch
+    REDIS_URL: redis://redis:6379
+    INGEST_URL: http://ingest-gateway:8081
+    DELIVERY_URL: http://delivery-worker:8082
+    NOTIFIER_URL: http://notifier-service:8083
+    BILLING_URL: http://billing-service:8084
+    MAX_ATTEMPTS: 6
+    BACKOFF_BASE_MS: 2000
+    BACKOFF_CAP_MS: 300000
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: hookwatch
+      POSTGRES_PASSWORD: hookwatch
+      POSTGRES_DB: hookwatch
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U hookwatch']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    command: ['redis-server', '--appendonly', 'yes']
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  ingest-gateway:
+    <<: *service-defaults
+    environment:
+      <<: *env-defaults
+      SERVICE_NAME: ingest-gateway
+      PORT: '8081'
+      ENTRY: services/ingest-gateway/index.js
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:8081}
+    ports:
+      - '8081:8081'
+
+  delivery-worker:
+    <<: *service-defaults
+    environment:
+      <<: *env-defaults
+      SERVICE_NAME: delivery-worker
+      PORT: '8082'
+      ENTRY: services/delivery-worker/index.js
+    # Single replica on purpose: the retry scheduler sweeps storage for rows
+    # whose backoff elapsed, which needs either one worker or a claim column.
+    # Add per-row claims in PostgresStore before scaling this out.
+    deploy:
+      replicas: 1
+
+  notifier-service:
+    <<: *service-defaults
+    environment:
+      <<: *env-defaults
+      SERVICE_NAME: notifier-service
+      PORT: '8083'
+      ENTRY: services/notifier-service/index.js
+
+  billing-service:
+    <<: *service-defaults
+    environment:
+      <<: *env-defaults
+      SERVICE_NAME: billing-service
+      PORT: '8084'
+      ENTRY: services/billing-service/index.js
+
+  dashboard-service:
+    <<: *service-defaults
+    environment:
+      <<: *env-defaults
+      SERVICE_NAME: dashboard-service
+      PORT: '8080'
+      ENTRY: services/dashboard-service/index.js
+    ports:
+      - '8080:8080'
+    depends_on:
+      ingest-gateway:
+        condition: service_started
+      delivery-worker:
+        condition: service_started
+      billing-service:
+        condition: service_started
+      notifier-service:
+        condition: service_started
+
+  # Local receiver double, used for the demo and for integration tests.
+  # No Postgres/Redis: it runs with empty connection strings, so the shared
+  # layer falls back to its file drivers.
+  mock-target:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      SERVICE_NAME: mock-target
+      PORT: '8090'
+      ENTRY: services/mock-target/index.js
+      DATABASE_URL: ''
+      REDIS_URL: ''
+      INTERNAL_TOKEN: ${INTERNAL_TOKEN:-dev-internal-token}
+    ports:
+      - '8090:8090'
+
+volumes:
+  pgdata:
+  redisdata:

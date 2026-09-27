@@ -1,0 +1,20 @@
+{
+  "name": "hookwatch",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Webhook monitoring, logging and automatic retries for indie hackers and small teams.",
+  "workspaces": [
+    "packages/*",
+    "services/*"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "node scripts/dev.js",
+    "seed": "node scripts/seed.js",
+    "test": "node --test --test-reporter=spec \"packages/*/test/*.test.js\" \"services/*/test/*.test.js\""
+  },
+  "devDependencies": {}
+}

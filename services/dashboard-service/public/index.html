@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>HookWatch — webhook monitoring</title>
+    <link rel="stylesheet" href="/app.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <span class="dot" id="status-dot"></span>
+        <strong>HookWatch</strong>
+        <span class="muted">webhook monitoring &amp; retries</span>
+      </div>
+      <div class="org">
+        <label for="org">org</label>
+        <input id="org" value="acme" spellcheck="false" />
+        <button id="refresh" class="ghost" type="button">Refresh</button>
+        <label class="switch"><input id="auto" type="checkbox" checked /> auto</label>
+      </div>
+    </header>
+
+    <main>
+      <section class="kpis" id="kpis"></section>
+
+      <section class="panel">
+        <h2>Endpoints</h2>
+        <p class="muted small">Point Stripe / GitHub / Shopify at the ingest URL. Payloads are logged, signed and retried automatically.</p>
+        <div id="endpoints" class="stack"></div>
+        <form id="new-endpoint" class="row-form">
+          <input name="name" placeholder="name (e.g. stripe)" required />
+          <input name="target_url" placeholder="target url (https://…)" required type="url" />
+          <select name="channel">
+            <option value="log">log</option>
+            <option value="slack">slack</option>
+            <option value="discord">discord</option>
+            <option value="webhook">webhook</option>
+          </select>
+          <input name="channel_target" placeholder="channel url (optional)" />
+          <button type="submit">Add endpoint</button>
+        </form>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">
+          <h2>Deliveries</h2>
+          <div class="filters">
+            <button data-status="" class="chip active" type="button">all</button>
+            <button data-status="delivered" class="chip" type="button">delivered</button>
+            <button data-status="retrying" class="chip" type="button">retrying</button>
+            <button data-status="dead" class="chip" type="button">dead</button>
+            <button data-status="queued" class="chip" type="button">queued</button>
+          </div>
+        </div>
+        <div id="deliveries" class="stack"></div>
+      </section>
+
+      <section class="panel split">
+        <div>
+          <h2>Alerts</h2>
+          <div id="alerts" class="stack"></div>
+        </div>
+        <div>
+          <h2>Plan &amp; usage</h2>
+          <div id="billing"></div>
+          <h2>Test the failure path</h2>
+          <p class="muted small">Send a payload to an endpoint whose target is down and watch it retry, dead-letter and alert.</p>
+          <div id="senders" class="stack"></div>
+        </div>
+      </section>
+    </main>
+
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>
