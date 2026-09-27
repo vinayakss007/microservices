@@ -18,7 +18,7 @@ everything else is the standard library.
 | `ingest-gateway` | 8081 | Public sink `POST /i/:path`, endpoint CRUD, delivery log, replay |
 | `delivery-worker` | 8082 | Consumes the deliver stream, retries with backoff, dead-letters |
 | `notifier-service` | 8083 | Consumes the alert stream, dispatches to Slack/Discord/Telegram/webhook/log |
-| `billing-service` | 8084 | Plans, usage metering, quota gates, subscriptions, MRR |
+| `billing-service` | 8084 | Plans, usage metering, quota gates, subscriptions, MRR, retention sweep |
 | `mock-target` | 8090 | Local stand-in for a customer receiver (`/`, `/flaky`, `/down`) |
 
 `packages/shared` holds what every service needs: config, logger, the store and queue
@@ -36,7 +36,7 @@ npm install
 npm run dev          # boots all six processes
 npm run seed         # demo org: happy path, a flaky target, a dead letter, an alert
 open http://localhost:8080
-npm test             # 22 tests
+npm test             # 36 tests
 ```
 
 With Docker:
@@ -100,6 +100,11 @@ outage — "how many events did I actually miss?"
 Write and internal routes require `x-hookwatch-internal`. The browser only ever talks to
 the dashboard, which injects that header when it fans out to `/api/(ingest|delivery|notifier|billing)/…`.
 
+Because the proxy holds the token, it cannot rely on the upstream's token check to protect
+itself. Two classes of route are therefore denied at the proxy and return 404 there:
+`/v1/retention/*` (it deletes rows) and `/v1/revenue` (aggregate MRR is not this org's
+data). Everything else the dashboard needs is reachable.
+
 ingest-gateway
 - `GET/POST /v1/endpoints`, `PATCH/DELETE /v1/endpoints/:id`
 - `POST /i/:path` — public sink
@@ -108,7 +113,8 @@ ingest-gateway
 
 billing-service
 - `GET /v1/plans`, `POST /v1/usage`, `GET /v1/usage`
-- `POST /v1/quota/endpoints`, `POST /v1/subscriptions`, `GET /v1/subscriptions`, `GET /v1/revenue`
+- `POST /v1/quota/endpoints`, `POST /v1/subscriptions`, `GET /v1/subscriptions`
+- `GET /v1/revenue` (internal only), `POST /v1/retention/sweep` (internal only)
 
 notifier-service
 - `GET /v1/alerts?org_id=…&limit=…`
@@ -130,6 +136,24 @@ invoice shows `overage_cents: 0` and the dashboard nudges an upgrade. Dropping a
 events because of a billing counter is the fastest way to lose the account that generated the
 overage. The hard limit is endpoint count, which returns HTTP 402.
 
+Retention **is** enforced, and the window above is the window the sweeper applies. Billing
+runs it hourly (`RETENTION_SWEEP_MS`) and once shortly after boot; `POST /v1/retention/sweep`
+forces a pass for ops. The rules that make deletion safe to run unattended:
+
+- Only settled rows go. Deliveries purge at `delivered`/`dead`, alerts at
+  `sent`/`failed`/`error`. A row that is `queued`, `retrying` or `in_progress` is
+  mid-flight — pruning it would drop an event the customer was promised. `purgeOlderThan`
+  requires an explicit status allowlist rather than defaulting to "everything".
+- An org with history but no subscription row is skipped and reported in
+  `skipped_no_plan`, not swept on the Free tier's aggressive 1-day default. Deletion rules
+  you never agreed to are not implied by the existence of a row.
+- A non-positive `retention_days` is treated as unlimited, matching `endpoint_limit: -1`.
+  A typo in a plan table must never mean "delete the world".
+- Only `deliveries` and `alerts` are purgeable. `usage` and `subscriptions` are refused by
+  name, so a bug in the sweep can never erase the billing record.
+- Orgs are grouped by window, so the file driver rewrites each table once per distinct
+  period rather than once per org.
+
 ## Design notes
 
 - **Two drivers, one interface.** `FileStore`/`PostgresStore` and `FileQueue`/`RedisQueue`
@@ -144,9 +168,12 @@ overage. The hard limit is endpoint count, which returns HTTP 402.
   `PostgresStore` first; the compose file says so rather than letting someone scale it blind.
 - **Boot ordering.** The gateway calls billing synchronously when an endpoint is created, so
   billing must be up. `scripts/dev.js` starts it first.
-- **Not done yet: retention.** `retention_days` is defined per plan and reported by billing,
-  but nothing prunes old rows. That is a real gap, not a feature, and the first thing to add
-  before this holds production traffic.
+- **The proxy is a trust boundary, not a pass-through.** It injects the internal token, so
+  upstream auth cannot protect it from itself; denylisted paths are rejected before the
+  request leaves the process.
+- **Deletion is the one irreversible thing here.** Retention is the only code that destroys
+  customer data, which is why it is allowlisted three ways: table, status, and a priced plan
+  window. See Pricing.
 
 ## Environment
 
@@ -155,7 +182,7 @@ overage. The hard limit is endpoint count, which returns HTTP 402.
 `INGEST_URL`, `DELIVERY_URL`, `NOTIFIER_URL`, `BILLING_URL`, `MAX_ATTEMPTS` (6),
 `BACKOFF_BASE_MS` (2000), `BACKOFF_CAP_MS` (300000), `DELIVERY_TIMEOUT_MS` (8000),
 `POLL_INTERVAL_MS` (1000), `MAX_PAYLOAD_BYTES` (262144, above it the sink answers 413),
-`ALERT_COOLDOWN_MS` (600000).
+`ALERT_COOLDOWN_MS` (600000), `RETENTION_SWEEP_MS` (3600000).
 
 `INTERNAL_TOKEN` defaults to `dev-internal-token`, and `DASHBOARD_ORIGIN` defaults to `*`.
 Change both before exposing any of this.
@@ -166,8 +193,16 @@ Change both before exposing any of this.
 npm test
 ```
 
-Shared-layer unit tests cover retry maths, signing, the plans table, locking and the file
-store. The ingest-gateway suite is end-to-end: it boots the real gateway, worker, notifier
-and billing apps against an in-process HTTP target and asserts the full ladder — delivery,
-retry, dead-letter, alert, quota gating, pause → sink 404 → repoint → replay, and that
-`PATCH` rejects bad input instead of silently corrupting an endpoint.
+Six suites, 36 tests. Shared (12) covers retry maths, signing, the plans table, locking,
+the file store round-trip and the queue's per-consumer cursors. Delivery worker (5) covers
+status classification, header forwarding, timeouts and connection refusal. Ingest gateway (5)
+is end-to-end: it boots the real gateway, worker, notifier and billing apps against an
+in-process HTTP target and asserts the whole ladder — delivery, retry, dead-letter, alert,
+quota gating, pause → sink 404 → repoint → replay, and that `PATCH` rejects bad input
+instead of silently corrupting an endpoint. Billing (7) covers the retention sweeper:
+per-plan windows, in-flight rows surviving a sweep a year past their window, an unpriced org
+being skipped, and the purge allowlists refusing out-of-scope tables. Dashboard (7) pins the
+proxy boundary — token injected on allowed paths, never leaked in a response, destructive
+routes 404 before reaching the upstream, and path traversal tested over a raw socket because
+`fetch` normalises `../` before it hits the wire.
+

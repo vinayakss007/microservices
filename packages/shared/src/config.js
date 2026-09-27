@@ -42,4 +42,7 @@ export const config = {
 
   // Alerting
   alertCooldownMs: num(process.env.ALERT_COOLDOWN_MS, 10 * 60_000),
+
+  // Retention sweeper (billing-service)
+  retentionSweepMs: num(process.env.RETENTION_SWEEP_MS, 60 * 60_000),
 };

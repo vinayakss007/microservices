@@ -164,7 +164,7 @@ function renderBilling(subscription, usage) {
   box.textContent = '';
   if (!subscription) return;
   const card = el('div', 'card');
-  card.append(el('div', 'name', `${subscription.plan.name} plan`));
+  card.append(el('div', 'name', `${subscription.plan.name} plan · keeps ${subscription.plan.retention_days}d of log`));
   card.append(
     el(
       'div',

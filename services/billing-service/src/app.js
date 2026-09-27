@@ -20,7 +20,7 @@ const WARN_AT = [0.8, 1.0];
  * what plan an org is on, whether it may create another endpoint, and whether
  * it is close enough to its request cap to be paged.
  */
-export function createBillingApp({ store, queue }) {
+export function createBillingApp({ store, queue, sweeper }) {
   // Per-process, per-period dedupe so a warning pages once, not on every request.
   const warned = new Set();
 
@@ -167,7 +167,14 @@ export function createBillingApp({ store, queue }) {
       const usage = await usageFor(orgId);
       return {
         org_id: orgId,
-        plan: { id: plan.id, name: plan.name, price_monthly_cents: plan.price_monthly_cents },
+        plan: {
+          id: plan.id,
+          name: plan.name,
+          price_monthly_cents: plan.price_monthly_cents,
+          // Show the customer the window the sweep actually enforces, so the
+          // number on the pricing page is the number they get.
+          retention_days: plan.retention_days,
+        },
         status: subscription.status,
         invoice: {
           period: usage.period,
@@ -180,6 +187,17 @@ export function createBillingApp({ store, queue }) {
           total_cents: plan.price_monthly_cents,
         },
       };
+    },
+
+    /**
+     * Run the retention sweep now instead of waiting for the interval. Ops
+     * only: a customer-triggered delete would be a denial-of-service against
+     * their own log.
+     */
+    'POST /v1/retention/sweep': async ({ req }) => {
+      requireInternalToken(req);
+      if (!sweeper) throw new HttpError(503, 'retention sweeper not running');
+      return sweeper.runNow();
     },
 
     'GET /v1/revenue': async ({ req }) => {

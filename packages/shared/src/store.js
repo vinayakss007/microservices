@@ -19,6 +19,31 @@ import { acquireLock, releaseLock } from './lock.js';
 
 const TABLES = ['endpoints', 'deliveries', 'alerts', 'usage', 'subscriptions'];
 
+/**
+ * The only tables retention may prune. Both carry a `status` and an `org_id`;
+ * usage and subscriptions are deliberately excluded — a sweep that could reach
+ * the billing record is a sweep that can erase an invoice.
+ */
+const PURGEABLE = ['deliveries', 'alerts'];
+
+/** Interpolated into SQL, so only a known table may ever be passed. */
+function assertTable(table) {
+  if (!TABLES.includes(table)) throw new Error(`unknown table: ${table}`);
+  return table;
+}
+
+function assertPurgeable(table) {
+  if (!PURGEABLE.includes(table)) throw new Error(`table is not purgeable: ${table}`);
+  return table;
+}
+
+function assertStatuses(statuses) {
+  if (!Array.isArray(statuses) || statuses.length === 0) {
+    throw new Error('purge requires an explicit status allowlist');
+  }
+  return statuses;
+}
+
 function clone(value) {
   return value === undefined ? undefined : JSON.parse(JSON.stringify(value));
 }
@@ -108,6 +133,27 @@ export class FileStore {
       if (next.length === rows.length) return false;
       await this.#write(table, next);
       return true;
+    });
+  }
+
+  /**
+   * Bulk delete for retention. `statuses` is required: a row whose delivery is
+   * still in flight must never be pruned, so the caller has to name the
+   * terminal states it considers safe to lose. Returns the removed ids.
+   */
+  async purgeOlderThan(table, { beforeIso, statuses, orgIds }) {
+    assertPurgeable(table);
+    assertStatuses(statuses);
+    return this.#exclusive(async () => {
+      const rows = await this.#read(table);
+      const stale = (row) =>
+        statuses.includes(row.status) &&
+        (!orgIds || orgIds.includes(row.org_id)) &&
+        String(row.created_at ?? '') < beforeIso;
+      const removed = rows.filter(stale);
+      if (!removed.length) return [];
+      await this.#write(table, rows.filter((row) => !stale(row)));
+      return removed.map((row) => row.id);
     });
   }
 
@@ -214,7 +260,7 @@ export class PostgresStore {
   }
 
   async list(table, filter = () => true) {
-    const { rows } = await this.pool.query(`select * from ${table}`);
+    const { rows } = await this.pool.query(`select * from ${assertTable(table)}`);
     return rows.filter(filter);
   }
 
@@ -224,7 +270,7 @@ export class PostgresStore {
   }
 
   async get(table, id) {
-    const { rows } = await this.pool.query(`select * from ${table} where id = $1`, [id]);
+    const { rows } = await this.pool.query(`select * from ${assertTable(table)} where id = $1`, [id]);
     return rows[0];
   }
 
@@ -235,7 +281,7 @@ export class PostgresStore {
     const placeholders = entries.map((_, i) => `$${i + 1}`).join(', ');
     const params = entries.map(([, value]) => sql(value));
     const { rows } = await this.pool.query(
-      `insert into ${table} (${columns}) values (${placeholders}) returning *`,
+      `insert into ${assertTable(table)} (${columns}) values (${placeholders}) returning *`,
       params,
     );
     return rows[0] ?? clone(row);
@@ -247,15 +293,27 @@ export class PostgresStore {
     const sets = entries.map(([key], i) => `${key} = $${i + 1}`).join(', ');
     const params = entries.map(([, value]) => sql(value));
     const { rows } = await this.pool.query(
-      `update ${table} set ${sets} where id = $${entries.length + 1} returning *`,
+      `update ${assertTable(table)} set ${sets} where id = $${entries.length + 1} returning *`,
       [...params, id],
     );
     return rows[0];
   }
 
   async remove(table, id) {
-    const { rowCount } = await this.pool.query(`delete from ${table} where id = $1`, [id]);
+    const { rowCount } = await this.pool.query(`delete from ${assertTable(table)} where id = $1`, [id]);
     return rowCount > 0;
+  }
+
+  async purgeOlderThan(table, { beforeIso, statuses, orgIds }) {
+    assertPurgeable(table);
+    assertStatuses(statuses);
+    const params = [new Date(beforeIso), statuses];
+    // delete...returning id, so the caller can report what a sweep actually cost.
+    let query = `delete from ${table} where status = any($2) and created_at < $1`;
+    if (orgIds) query += ` and org_id = any($3)`;
+    if (orgIds) params.push(orgIds);
+    const { rows } = await this.pool.query(`${query} returning id`, params);
+    return rows.map((row) => row.id);
   }
 
   async appendUsage(orgId, event) {
