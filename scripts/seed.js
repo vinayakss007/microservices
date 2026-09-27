@@ -52,13 +52,25 @@ for (let i = 1; i <= 2; i += 1) {
   }
 }
 
-console.log('\nwaiting for backoff to drain (2s, 8s, 32s ladder)...');
-await sleep(12000);
+// Wait for the ladder to settle instead of guessing a sleep: with the default
+// MAX_ATTEMPTS=6 the full backoff runs past two minutes.
+console.log('\nwaiting for deliveries to settle...');
+const deadline = Date.now() + 180_000;
+let deliveries = [];
+for (;;) {
+  deliveries = await (await fetch(`${ingest}/v1/deliveries?limit=30`, { headers: { 'x-org-id': 'acme' } })).json();
+  const pending = deliveries.filter((d) => d.status === 'queued' || d.status === 'retrying' || d.status === 'in_progress');
+  if (!pending.length || Date.now() > deadline) break;
+  console.log(`  ${pending.length} still retrying (highest attempt ${Math.max(...pending.map((d) => d.attempt))})...`);
+  await sleep(10_000);
+}
 
-const deliveries = await (await fetch(`${ingest}/v1/deliveries?limit=30`, { headers: { 'x-org-id': 'acme' } })).json();
 const summary = deliveries.reduce((acc, d) => ({ ...acc, [d.status]: (acc[d.status] ?? 0) + 1 }), {});
 console.log('delivery states:', summary);
 console.log('attempts seen:', deliveries.map((d) => `${d.status}/${d.attempt}`).slice(0, 8).join(', '));
+
+const alerts = await (await fetch(`${process.env.NOTIFIER_URL ?? 'http://127.0.0.1:8083'}/v1/alerts?limit=10`, { headers: { 'x-org-id': 'acme' } })).json();
+console.log('alerts:', alerts.map((a) => `${a.kind} -> ${a.channel} ${a.status}`).join(' | ') || 'none');
 
 console.log('billing:', await (await fetch(`${billing}/v1/revenue`, { headers: internal })).json());
 console.log('\ndashboard: http://localhost:8080 (org "acme")');
